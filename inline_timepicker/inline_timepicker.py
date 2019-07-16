@@ -1,198 +1,167 @@
 import datetime
 import logging
 import shelve
-import utils
+from dataclasses import dataclass
+from typing import Optional, Dict, Union
+
+from aiogram.utils.callback_data import CallbackData, CallbackDataFilter
+from aiogram import types
+
+import inline_timepicker.utils as utils
+from inline_timepicker.exceptions import (
+    NotInitedException,
+    WrongCallbackException
+)
 
 
-class WrongCallbackException(Exception):
-    pass
+@dataclass
+class InlineTimepickerData():
+    min_time: datetime.time
+    max_time: datetime.time
+    current_time: datetime.time
+    minute_step: int
+    hour_step: int
 
 
-class WrongChoiceCallbackException(Exception):
-    pass
+class InlineTimepicker:
+    _cb_prefix = 'inline_timepicker'
+    BASE_CALLBACK = CallbackData(_cb_prefix, 'action', 'data')
+    CALLBACK_WRONG_CHOICE = BASE_CALLBACK.new(action='wrong_choice', data='-')
+    CALLBACK_HOUR_DECREASE = BASE_CALLBACK.new(action='dec', data='hour')
+    CALLBACK_HOUR_INCREASE = BASE_CALLBACK.new(action='inc', data='hour')
+    CALLBACK_MINUTE_DECREASE = BASE_CALLBACK.new(action='dec', data='minute')
+    CALLBACK_MINUTE_INCREASE = BASE_CALLBACK.new(action='inc', data='minute')
+    CALLBACK_SUCCESS = BASE_CALLBACK.new(action='success', data='-')
 
+    def __init__(self):
+        self.data = {}
 
-class NotInitedException(Exception):
-    pass
+    def _get_user_info(self, chat_id: int) -> Optional[InlineTimepickerData]:
+        return self.data.get(chat_id, None)
 
+    def _set_user_info(self, chat_id: int, data: Optional[InlineTimepickerData]):
+        self.data[chat_id] = data
 
-_INLINE_TIMEPICKER_NAME = 'inline_timepicker'
-_SHELVE_DB_NAME = "inline_timepicker_shelve_db"
+    def filter(self, **full_config) -> CallbackDataFilter:
+        return InlineTimepicker.BASE_CALLBACK.filter(**full_config)
 
-_MIN_TIME = '_MIN_TIME'
-_MAX_TIME = '_MAX_TIME'
-_CURRENT_TIME = '_CURRENT_TIME'
-_MINUTE_STEP = '_MINUTE_STEP'
-_HOUR_STEP = '_HOUR_STEP'
+    def init(self,
+             base_time: datetime.time,
+             min_time: datetime.time,
+             max_time: datetime.time,
+             chat_id: Optional[int] = None,
+             minute_step: int = 15,
+             hour_step: int = 1):
 
-CALLBACK_HOUR_PICKED = '{}_HOUR_'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_HOUR_DECREASE = '{}_HOUR_DEC'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_HOUR_INCREASE = '{}_HOUR_INC'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_MINUTE_PICKED = '{}_MINUTE_'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_MINUTE_DECREASE = '{}_MINUTE_DECR'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_MINUTE_INCREASE = '{}_MINUTE_INC'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_WRONG_CHOICE = '{}_WRONG_CHOICE'.format(_INLINE_TIMEPICKER_NAME)
-CALLBACK_SUCCESS = '{}_SUCCESS'.format(_INLINE_TIMEPICKER_NAME)
+        if chat_id is None:
+            chat_id = types.User.get_current().id
 
+        self._set_user_info(
+            chat_id,
+            InlineTimepickerData(
+                min_time, max_time, base_time, minute_step, hour_step
+            )
+        )
 
-def _db_read(chat_id, attr_name):
-    chat_id = str(chat_id)
-    attr_name = str(attr_name)
-    try:
-        with shelve.open(_SHELVE_DB_NAME) as db:
-            t = db[chat_id]
-            return t[attr_name]
-    except KeyError:
-        logging.log(level=logging.CRITICAL, msg='KeyError was raised while getting attribute {} for {}'
-                    .format(attr_name, chat_id))
+    def is_inited(self, chat_id: Optional[int] = None) -> bool:
+        if chat_id is None:
+            chat_id = types.User.get_current().id
+        return self._get_user_info(chat_id) is not None
 
+    def reset(self, chat_id: Optional[int] = None):
+        if chat_id is None:
+            chat_id = types.User.get_current().id
+        self._set_user_info(chat_id, None)
 
-def _db_write(chat_id, attr_name, data):
-    chat_id = str(chat_id)
-    attr_name = str(attr_name)
-    with shelve.open(_SHELVE_DB_NAME) as db:
-        if chat_id not in db.keys():
-            # first time creation of dictionary
-            db[chat_id] = {}
-        t = db[chat_id]
-        t[attr_name] = data
-        db[chat_id] = t
+    def get_keyboard(self, chat_id: Optional[int] = None) -> types.InlineKeyboardMarkup:
+        if chat_id is None:
+            chat_id = types.User.get_current().id
 
+        if not self.is_inited(chat_id):
+            raise NotInitedException('inline_timepicker is not inited properly')
 
-def _init_db(chat_id):
-    chat_id = str(chat_id)
-    with shelve.open(_SHELVE_DB_NAME) as db:
-        db[chat_id] = {}
+        kb = utils.create_inline_keyboard()
+        user_info = self._get_user_info(chat_id)
+        curr_date_time = datetime.datetime.now().replace(hour=user_info.current_time.hour, minute=user_info.current_time.minute)
+        min_date_time = datetime.datetime.now().replace(hour=user_info.min_time.hour, minute=user_info.min_time.minute)
+        max_date_time = datetime.datetime.now().replace(hour=user_info.max_time.hour, minute=user_info.max_time.minute)
 
+        minute_step_date_time = datetime.timedelta(minutes=user_info.minute_step)
+        an_hour_date_time = datetime.timedelta(hours=user_info.hour_step)
+        rows = [[] for i in range(4)]
 
-def _check_callback(cb):
-    if cb == CALLBACK_HOUR_DECREASE or \
-            cb == CALLBACK_HOUR_INCREASE or \
-            cb == CALLBACK_HOUR_PICKED:
-        return True
-    if cb == CALLBACK_MINUTE_DECREASE or \
-            cb == CALLBACK_MINUTE_INCREASE or \
-            cb == CALLBACK_MINUTE_PICKED:
-        return True
-    if cb == CALLBACK_WRONG_CHOICE:
-        return True
-    if cb == CALLBACK_SUCCESS:
-        return True
-    return False
+        if curr_date_time + an_hour_date_time <= max_date_time:
+            rows[0].append(utils.create_inline_callback_button('↑', InlineTimepicker.CALLBACK_HOUR_INCREASE))
+        else:
+            rows[0].append(utils.create_inline_callback_button(' ', InlineTimepicker.CALLBACK_WRONG_CHOICE))
 
+        if curr_date_time + minute_step_date_time <= max_date_time:
+            rows[0].append(utils.create_inline_callback_button('↑', InlineTimepicker.CALLBACK_MINUTE_INCREASE))
+        else:
+            rows[0].append(utils.create_inline_callback_button(' ', InlineTimepicker.CALLBACK_WRONG_CHOICE))
 
-def is_inited(chat_id):
-    chat_id = str(chat_id)
-    with shelve.open(_SHELVE_DB_NAME) as db:
-        if chat_id not in db.keys():
-            return False
+        if curr_date_time - an_hour_date_time >= min_date_time:
+            rows[2].append(utils.create_inline_callback_button('↓', InlineTimepicker.CALLBACK_HOUR_DECREASE))
+        else:
+            rows[2].append(utils.create_inline_callback_button(' ', InlineTimepicker.CALLBACK_WRONG_CHOICE))
 
-    return _db_read(chat_id, _CURRENT_TIME) is not None
+        if curr_date_time - minute_step_date_time >= min_date_time:
+            rows[2].append(utils.create_inline_callback_button('↓', InlineTimepicker.CALLBACK_MINUTE_DECREASE))
+        else:
+            rows[2].append(utils.create_inline_callback_button(' ', InlineTimepicker.CALLBACK_WRONG_CHOICE))
 
+        rows[1].extend([
+            utils.create_inline_callback_button(user_info.current_time.hour, InlineTimepicker.CALLBACK_WRONG_CHOICE),
+            utils.create_inline_callback_button(user_info.current_time.minute, InlineTimepicker.CALLBACK_WRONG_CHOICE)
+        ])
+        rows[-1].append(utils.create_inline_callback_button('OK', InlineTimepicker.CALLBACK_SUCCESS))
 
-def reset(chat_id):
-    chat_id = str(chat_id)
-    _db_write(chat_id, _CURRENT_TIME, None)
-    _db_write(chat_id, _MIN_TIME, None)
-    _db_write(chat_id, _MAX_TIME, None)
+        for row in rows:
+            kb.row(*row)
 
+        return kb
 
-def init(chat_id, base_time, min_time, max_time, minute_step=15, hour_step=1):
-    _init_db(chat_id)
-    _db_write(chat_id, _CURRENT_TIME, base_time)
-    _db_write(chat_id, _MIN_TIME, min_time)
-    _db_write(chat_id, _MAX_TIME, max_time)
-    _db_write(chat_id, _MINUTE_STEP, minute_step)
-    _db_write(chat_id, _HOUR_STEP, hour_step)
+    def handle(self, chat_id: int, callback_data: Union[Dict[str, str], str]) -> Optional[datetime.time]:
+        if not self.is_inited(chat_id):
+            raise NotInitedException()
 
+        if isinstance(callback_data, str):
+            try:
+                callback_data = InlineTimepicker.BASE_CALLBACK.parse(callback_data)
+            except ValueError:
+                raise WrongCallbackException("wrong callback data")
 
-def get_keyboard(chat_id):
-    if not is_inited(chat_id):
-        raise NotInitedException('inline_timepicker is not inited properly')
+        user_info = self._get_user_info(chat_id)
+        action = callback_data.get('action', None)
+        data = callback_data.get('data', None)
+        if action is None or data is None:
+            raise WrongCallbackException("wrong callback data")
 
-    kb = utils.create_inline_keyboard()
-    curr_time = _db_read(chat_id, _CURRENT_TIME)
-    min_time = _db_read(chat_id, _MIN_TIME)
-    max_time = _db_read(chat_id, _MAX_TIME)
-    min_step = _db_read(chat_id, _MINUTE_STEP)
+        curr_date_time = datetime.datetime.now().replace(hour=user_info.current_time.hour,
+                                                         minute=user_info.current_time.minute)
+        minute_step_date_time = datetime.timedelta(minutes=user_info.minute_step)
+        hour_step_date_time = datetime.timedelta(hours=user_info.hour_step)
 
-    curr_date_time = datetime.datetime.now().replace(hour=curr_time.hour, minute=curr_time.minute)
-    min_date_time = datetime.datetime.now().replace(hour=min_time.hour, minute=min_time.minute)
-    max_date_time = datetime.datetime.now().replace(hour=max_time.hour, minute=max_time.minute)
+        if action == 'success':
+            self.reset(chat_id=chat_id)
+            return user_info.current_time
 
-    minute_step_date_time = datetime.timedelta(minutes=min_step)
-    an_hour_date_time = datetime.timedelta(hours=1)
-    rows = [[] for i in range(4)]
+        if action == 'inc':
+            if data == 'hour':
+                curr_date_time += hour_step_date_time
+            elif data == 'minute':
+                curr_date_time += minute_step_date_time
+        elif action == 'dec':
+            if data == 'hour':
+                curr_date_time -= hour_step_date_time
+            elif data == 'minute':
+                curr_date_time -= minute_step_date_time
+        else:
+            raise WrongCallbackException("wrong callback data")
 
-    if curr_date_time + an_hour_date_time <= max_date_time:
-        rows[0].append(utils.create_inline_callback_button('↑', CALLBACK_HOUR_INCREASE))
-    else:
-        rows[0].append(utils.create_inline_callback_button(' ', CALLBACK_WRONG_CHOICE))
+        curr_time = datetime.time(curr_date_time.hour, curr_date_time.minute)
+        if curr_time > user_info.max_time or curr_time < user_info.min_time:
+            return
 
-    if curr_date_time + minute_step_date_time <= max_date_time:
-        rows[0].append(utils.create_inline_callback_button('↑', CALLBACK_MINUTE_INCREASE))
-    else:
-        rows[0].append(utils.create_inline_callback_button(' ', CALLBACK_WRONG_CHOICE))
-
-    if curr_date_time - an_hour_date_time >= min_date_time:
-        rows[2].append(utils.create_inline_callback_button('↓', CALLBACK_HOUR_DECREASE))
-    else:
-        rows[2].append(utils.create_inline_callback_button(' ', CALLBACK_WRONG_CHOICE))
-
-    if curr_date_time - minute_step_date_time >= min_date_time:
-        rows[2].append(utils.create_inline_callback_button('↓', CALLBACK_MINUTE_DECREASE))
-    else:
-        rows[2].append(utils.create_inline_callback_button(' ', CALLBACK_WRONG_CHOICE))
-
-    rows[1].extend([
-        utils.create_inline_callback_button(curr_time.hour, CALLBACK_WRONG_CHOICE),
-        utils.create_inline_callback_button(curr_time.minute, CALLBACK_WRONG_CHOICE)
-    ])
-    rows[-1].append(utils.create_inline_callback_button('OK', CALLBACK_SUCCESS))
-
-    for row in rows:
-        kb.row(*row)
-
-    return kb
-
-
-def is_inline_timepicker_callbackquery(query):
-    return _check_callback(query.data)
-
-
-def handle_callback(chat_id, callback):
-    if not is_inited(chat_id):
-        raise NotInitedException('inline_timepicker is not inited properly')
-
-    if not _check_callback(callback):
-        raise WrongCallbackException('Wrong callback is given for handling')
-
-    if callback == CALLBACK_WRONG_CHOICE:
-        return None
-
-    curr_time = _db_read(chat_id, _CURRENT_TIME)
-    curr_date_time = datetime.datetime.now().replace(hour=curr_time.hour, minute=curr_time.minute)
-
-    minute_step_date_time = datetime.timedelta(minutes=_db_read(chat_id, _MINUTE_STEP))
-    an_hour_date_time = datetime.timedelta(hours=_db_read(chat_id, _HOUR_STEP))
-
-    if callback == CALLBACK_MINUTE_DECREASE:
-        curr_date_time = curr_date_time - minute_step_date_time
-    if callback == CALLBACK_MINUTE_INCREASE:
-        curr_date_time = curr_date_time + minute_step_date_time
-    if callback == CALLBACK_HOUR_DECREASE:
-        curr_date_time = curr_date_time - an_hour_date_time
-    if callback == CALLBACK_HOUR_INCREASE:
-        curr_date_time = curr_date_time + an_hour_date_time
-
-    print(type(_db_read(chat_id, _MAX_TIME)))
-
-    curr_time = datetime.time(curr_date_time.hour, curr_date_time.minute)
-    if curr_time > _db_read(chat_id, _MAX_TIME) or curr_time < _db_read(chat_id, _MIN_TIME):
-        return
-
-    n_time = datetime.time(curr_date_time.hour, curr_date_time.minute)
-    _db_write(chat_id, _CURRENT_TIME, n_time)
-
-    if callback == CALLBACK_SUCCESS:
-        return curr_time
+        user_info.current_time = curr_time
+        self._set_user_info(chat_id, user_info)
